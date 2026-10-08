@@ -100,6 +100,8 @@ textarea{min-height:90px;resize:vertical}
 .lim .tr{height:10px;border-radius:99px;background:rgba(255,255,255,.06);overflow:hidden;position:relative}
 .lim .tr i{position:absolute;left:0;top:0;bottom:0;border-radius:99px;transition:width 1s cubic-bezier(.2,.8,.2,1)}
 .lim .v{font-variant-numeric:tabular-nums;color:var(--muted);text-align:right;white-space:nowrap}
+.lim .tr .bd{position:absolute;top:0;bottom:0;background:rgba(59,232,164,.22);border-inline:1px solid rgba(59,232,164,.55);pointer-events:none}
+.lim .tr .mk{position:absolute;top:-2px;bottom:-2px;width:2px;margin-left:-1px;background:rgba(232,244,255,.85);pointer-events:none}
 .tag{display:inline-block;border-radius:6px;padding:1px 6px;font-size:.66rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase}
 .tag.max{background:rgba(255,79,112,.14);color:#FF9DB0}.tag.min{background:rgba(59,232,164,.14);color:var(--good)}
 /* Listas */
@@ -328,12 +330,42 @@ function limitStatus(k, val, burn){
   const ok = L.t === "max" ? val <= L.v : val >= L.v;
   return {...L, val, ok, pct: L.v ? val / L.v : 0};
 }
+/* Castigos. Calorías: sin margen. Proteína, carbohidratos y grasa: franja de ±10 % sobre el objetivo, por arriba y por abajo.
+   Límites propios (azúcar, sal…): Máx/Mín con la misma tolerancia del 10 % por el lado malo. */
+const MACROS = ["prot","carb","grasa"], TOL = .10;
+function evalDay(k, closed){
+  const day = S.days[k], t = totals(day), out = {items:[], pen:0};
+  if (!day || !t.meals) return out;
+  const kl = limitOf("kcal", t.burn);
+  if (kl && (t.n.kcal||0) > kl.v) {
+    const f = ((t.n.kcal||0) - kl.v) / kl.v;
+    out.items.push({k:"kcal", n:"Calorías", val:t.n.kcal||0, v:kl.v, u:"kcal", kind:"over", dev:f, pen:Math.round(50 + Math.min(150, f*400))});
+  }
+  for (const n of nutrients()) {
+    if (n.k === "kcal") continue;
+    const L = limitOf(n.k, t.burn); if (!L || !(L.v > 0)) continue;
+    const val = t.n[n.k]||0, f = (val - L.v) / L.v, two = MACROS.includes(n.k);
+    let kind = null, ex = 0;
+    if (f > TOL && (two || L.t === "max")) { kind = "over"; ex = f - TOL; }
+    else if (f < -TOL && (two || L.t === "min")) { kind = "under"; ex = -f - TOL; }
+    if (!kind) continue;
+    if (kind === "under" && !(closed && t.meals >= 2)) continue;   // quedarse corto solo se juzga con el día cerrado y 2+ comidas
+    out.items.push({k:n.k, n:n.n, val, v:L.v, u:n.u, kind, dev:f, pen:Math.round(20 + Math.min(40, ex*100))});
+  }
+  out.pen = out.items.reduce((a,i) => a + i.pen, 0);
+  return out;
+}
 function dayOk(k){
   const day = S.days[k], t = totals(day);
-  if (t.meals < 2) return false;
-  for (const n of nutrients()) { const st = limitStatus(n.k, t.n[n.k]||0, t.burn); if (st && st.t === "max" && !st.ok) return false; }
+  if (!day || t.meals < 2) return false;
+  if (evalDay(k, true).items.length) return false;
   const rs = S.dieta.reglas || []; if (rs.length && !rs.every(r => day.reglas && day.reglas[r.id])) return false;
   return true;
+}
+function dayScore(k, closed){
+  const t = totals(S.days[k]), ev = evalDay(k, closed);
+  const train = t.xp + (t.min >= 30 ? 10 : 0), logged = closed && t.meals ? 5 : 0, okb = closed && dayOk(k) ? 25 : 0;
+  return {train, logged, okb, pen:ev.pen, items:ev.items, net:train + logged + okb - ev.pen, ok:!!okb};
 }
 
 /* ================= entreno ================= */
@@ -372,10 +404,10 @@ function progress(){
   const t0 = todayKey(), keys = Object.keys(S.days).sort();
   let xp = 0, okDays = 0, burned = 0, mins = 0, wcount = 0, meals = 0, maxStreak = 0, run = 0, prev = null;
   for (const k of keys) {
-    const t = totals(S.days[k]);
-    xp += t.xp + (t.min >= 30 ? 10 : 0); burned += t.burn; mins += t.min; wcount += t.wks; meals += t.meals;
-    if (k < t0 && t.meals) xp += 5;
-    if (k < t0 && dayOk(k)) { xp += 25; okDays++; }
+    const t = totals(S.days[k]), sc = dayScore(k, k < t0);
+    xp = Math.max(0, xp + sc.net);           // el XP puede bajar pero nunca por debajo de 0
+    burned += t.burn; mins += t.min; wcount += t.wks; meals += t.meals;
+    if (sc.ok) okDays++;
     if (t.wks) { run = (prev && addDays(prev,1) === k) ? run + 1 : 1; prev = k; maxStreak = Math.max(maxStreak, run); }
   }
   let streak = 0, k = t0;
@@ -383,6 +415,7 @@ function progress(){
   while (totals(S.days[k]).wks) { streak++; k = addDays(k,-1); }
   return {xp, ...levelOf(xp), okDays, burned, mins, wcount, meals, streak, maxStreak};
 }
+const achOn = (a, p) => !!(S.profile && (S.profile.ach || []).includes(a.id)) || a.ok(p);
 const ACH = [
   {id:"despertar",n:"Despertar",ic:"star",c:"#43D6FF",ok:()=>true},
   {id:"comida1",n:"Primer registro",ic:"plate",c:"#3BE8A4",ok:p=>p.meals>=1},
@@ -447,6 +480,22 @@ const savePlatos = () => persist("platos", clone(S.platos));
 const dayDoc = k => S.days[k] || (S.days[k] = {fecha:k, comidas:[], entrenos:[], reglas:{}});
 
 const INTRO_T0 = performance.now();
+function reviewOnOpen(){
+  if (!S.profile || !S.profile.accepted || S.reviewed) return; S.reviewed = true;
+  const t0 = todayKey(), yest = addDays(t0, -1), p = progress();
+  const prevL = S.profile.lastLevel ?? p.L, last = S.profile.lastReview;
+  const days = [];
+  if (last) for (let k = addDays(last, 1); k <= yest; k = addDays(k, 1)) {
+    if (!S.days[k]) continue;
+    const sc = dayScore(k, true); if (sc.items.length || sc.okb) days.push({k, ...sc});
+  }
+  const shown = days.slice(-14);
+  const have = S.profile.ach || [], now = ACH.filter(a => achOn(a, p)).map(a => a.id);
+  const changed = last !== yest || S.profile.lastLevel !== p.L || now.some(id => !have.includes(id));
+  S.profile.lastReview = yest; S.profile.lastLevel = p.L; S.profile.ach = [...new Set([...have, ...now])];
+  if (changed) saveProfile();
+  if (shown.length || p.L !== prevL) { S.modal = {type:"report", days:shown, from:prevL, to:p.L}; renderLayer(); }
+}
 let introDone = false;
 function introWelcome(){
   if (introDone) return; introDone = true;
@@ -458,6 +507,7 @@ function introWelcome(){
   } else $("#iwelcome").textContent = "Nuevo jugador detectado.";
   const wait = RM ? 300 : Math.max(0, 2300 - (performance.now() - INTRO_T0));
   setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 600); }, wait);
+  setTimeout(() => { if (!S.modal) reviewOnOpen(); else S.reviewed = false; }, wait + 800);
   if (!RM) setTimeout(() => bolt(true), 250);
 }
 document.addEventListener("click", e => { if (e.target.closest && e.target.closest("#intro")) { const el = $("#intro"); el.classList.add("out"); setTimeout(() => el.remove(), 600); } }, true);
@@ -493,12 +543,16 @@ function notify(msg, kind){
   el.innerHTML = `<div class="win" style="${kind==="bad"?"border-color:rgba(255,79,112,.7)":""}"><div class="row" style="gap:10px;flex-wrap:nowrap"><span class="sys" style="color:${kind==="bad"?"#FF9DB0":"var(--cyan)"}">[SISTEMA]</span><span>${esc(msg)}</span></div></div>`;
   document.body.appendChild(el); setTimeout(() => { el.style.transition = "opacity .3s"; el.style.opacity = "0"; setTimeout(() => el.remove(), 320); }, 2600);
 }
-function snapshotProgress(){ const p = progress(); return {L:p.L, ach:ACH.filter(a => a.ok(p)).map(a => a.id)}; }
+function snapshotProgress(){ const p = progress(); return {L:p.L, ach:ACH.filter(a => achOn(a, p)).map(a => a.id)}; }
 function afterChange(before){
   const now = snapshotProgress();
   if (now.L > before.L) S.notices.push({type:"level", from:before.L, to:now.L});
+  else if (now.L < before.L) S.notices.push({type:"down", from:before.L, to:now.L});
   for (const id of now.ach) if (!before.ach.includes(id)) S.notices.push({type:"ach", id});
-  if (S.profile.lastLevel !== now.L) { S.profile.lastLevel = now.L; saveProfile(); }
+  const have = S.profile.ach || []; let dirty = false;
+  if (now.ach.some(id => !have.includes(id))) { S.profile.ach = [...new Set([...have, ...now.ach])]; dirty = true; }
+  if (S.profile.lastLevel !== now.L) { S.profile.lastLevel = now.L; dirty = true; }
+  if (dirty) saveProfile();
   if (!S.modal && S.notices.length) S.modal = S.notices.shift();
 }
 
@@ -527,7 +581,7 @@ function render(fromSnap){
 function renderLayer(){
   const m = S.modal;
   if (!m) { $("#layer").innerHTML = ""; return; }
-  $("#layer").innerHTML = {picker:mPicker, food:mFood, level:mLevel, ach:mAch, plato:mPlato}[m.type]();
+  $("#layer").innerHTML = {picker:mPicker, food:mFood, level:mLevel, ach:mAch, plato:mPlato, report:mReport, down:mDown}[m.type]();
   startAuras();
   if (m.type === "level" && !RM && !m.flashed) { m.flashed = true; const f = document.createElement("div"); f.className = "flash"; document.body.appendChild(f); setTimeout(() => f.remove(), 950); bolt(true); }
 }
@@ -578,8 +632,9 @@ function vInicio(){
   const rest = kc.v - kc.val, over = rest < 0;
   const C = 2*Math.PI*70, pct = Math.min(1, kc.v ? kc.val/kc.v : 0);
   const col = over ? "var(--bad)" : pct > .9 ? "var(--warn)" : "var(--cyan)";
-  const lims = nutrients().filter(n => n.k !== "kcal").map(n => limitStatus(n.k, t.n[n.k]||0, t.burn) && {...n, st:limitStatus(n.k, t.n[n.k]||0, t.burn)}).filter(Boolean);
-  const broken = lims.filter(l => l.st.t === "max" && !l.st.ok);
+  const closedDay = k < todayKey(), ev = evalDay(k, closedDay);
+  const lims = nutrients().filter(n => n.k !== "kcal").map(n => { const L = limitOf(n.k, t.burn); return L ? {...n, L, val:t.n[n.k]||0, two:MACROS.includes(n.k)} : null; }).filter(Boolean);
+  const broken = ev.items;
   const meals = (day?.comidas||[]).slice().sort((a,b) => (a.hora||"").localeCompare(b.hora||""));
   const reglas = S.dieta.reglas || [];
   return `
@@ -597,11 +652,16 @@ function vInicio(){
       <dt>Comido</dt><dd>${fmt(kc.val)}</dd><dt>Quemado</dt><dd>${fmt(t.burn)}</dd></dl>
   </div></section>
   ${broken.length ? `<div class="win" style="border-color:rgba(255,79,112,.7)"><div class="win-h" style="color:#FF9DB0;border-color:rgba(255,79,112,.35)"><span class="ic" style="border-color:#FF9DB0">!</span>Advertencia</div>
-    <p style="margin:0">Has superado tu límite de ${broken.map(b => esc(b.n.toLowerCase())).join(", ")}.</p></div>` : ""}
+    <p style="margin:0">${closedDay ? "Este día costó" : "Si el día acaba así perderás"} <b style="color:#FF9DB0">${fmt(ev.pen)} XP</b>: ${broken.map(b => `${esc(b.n.toLowerCase())} (${b.kind === "over" ? "+" : "−"}${Math.round(Math.abs(b.dev)*100)} %)`).join(", ")}.</p></div>` : ""}
   ${lims.length ? `<section class="panel stack"><div class="row between"><h2 class="hl m">Límites de hoy</h2><button class="link" data-act="nav" data-v="dieta">Editar</button></div>
-    ${lims.map(l => { const st = l.st, w = Math.min(100, st.pct*100);
-      const c = st.t === "max" ? (st.ok ? (st.pct > .9 ? "var(--warn)" : "var(--cyan)") : "var(--bad)") : (st.ok ? "var(--good)" : "var(--blue)");
-      return `<div class="lim"><span>${esc(l.n)} <span class="tag ${st.t}">${st.t}</span></span><div class="tr"><i data-w="${w.toFixed(1)}" style="background:${c};box-shadow:0 0 10px ${c}"></i></div><span class="v">${f1(st.val)} / ${fmt(st.v)} ${esc(l.u)}</span></div>`; }).join("")}
+    ${lims.map(l => { const v = l.L.v, pct = v ? l.val/v : 0, SC = 1.3;
+      const over = pct > 1 + TOL && (l.two || l.L.t === "max"), under = pct < 1 - TOL && (l.two || l.L.t === "min");
+      const c = over || (under && closedDay) ? "var(--bad)" : under ? "var(--blue)" : pct > 1 ? "var(--warn)" : "var(--good)";
+      const lo = l.two ? .9 : l.L.t === "min" ? .9 : 1, hi = l.two ? 1.1 : l.L.t === "min" ? 1 : 1.1;
+      return `<div class="lim"><span>${esc(l.n)} <span class="tag ${l.two ? "min" : l.L.t}">${l.two ? "±10 %" : l.L.t}</span></span>
+        <div class="tr"><i data-w="${Math.min(100, pct/SC*100).toFixed(1)}" style="background:${c};box-shadow:0 0 10px ${c}"></i><span class="bd" style="left:${lo/SC*100}%;width:${(hi-lo)/SC*100}%"></span><span class="mk" style="left:${100/SC}%"></span></div>
+        <span class="v">${f1(l.val)} / ${fmt(v)} ${esc(l.u)}</span></div>`; }).join("")}
+    <p class="muted" style="margin:0;font-size:.78rem">La franja verde es la zona sin castigo. Calorías: sin margen.</p>
   </section>` : ""}
   ${reglas.length ? `<section class="panel"><h2 class="hl m" style="margin-bottom:6px">Reglas de mi dieta</h2>
     ${reglas.map(r => { const on = !!(day && day.reglas && day.reglas[r.id]); return `<button class="check" data-act="regla" data-id="${r.id}" aria-pressed="${on}"><span class="bx">${on?"✓":""}</span><span>${esc(r.t)}</span></button>`; }).join("")}</section>` : ""}
@@ -932,7 +992,7 @@ function vNivel(){
   return `<h1 class="hl xl">Sube de <span class="c">rango</span></h1>
    <div class="chips">${seg.map(([k,t]) => `<button class="chip" data-act="tema" data-v="${k}" aria-pressed="${tema===k}">${t}</button>`).join("")}</div>
    ${body}${tema !== "informe" ? vGallery(tema) : ""}${vAch(p)}
-   <p class="muted" style="font-size:.8rem;margin:0">Cómo se gana XP: minutos de entreno × intensidad, más 1 XP por cada 10 kcal quemadas y +10 si pasas de 30 min. Sin tope: un día bestia cuenta entero. +5 por cada día con comidas registradas y +25 por cada día cumplido (al menos 2 comidas, sin pasar ningún máximo y con tus reglas marcadas). Los primeros niveles suben rápido y cada nivel cuesta más: entrenando una hora 5 días por semana, el nivel 100 llega en torno a un año.</p>`;
+   <p class="muted" style="font-size:.8rem;margin:0">Cómo se gana XP: minutos de entreno × intensidad, más 1 XP por cada 10 kcal quemadas y +10 si pasas de 30 min. Sin tope: un día bestia cuenta entero. +5 por cada día con comidas registradas y +25 por cada día cumplido (al menos 2 comidas, sin pasarte de calorías, con los macros dentro de ±10 % y tus reglas marcadas). Si te pasas de calorías o te sales de la franja de macros, pierdes XP al cerrar el día y puedes bajar de nivel. Los primeros niveles suben rápido y cada nivel cuesta más: entrenando una hora 5 días por semana, el nivel 100 llega en torno a un año.</p>`;
 }
 function vGallery(tema){
   const g = tema === "guerrero";
@@ -993,7 +1053,7 @@ function vSaiyan(p){
 }
 function vInforme(p){
   const t0 = todayKey(), base = calc(S.profile);
-  const rows = []; for (let i=6;i>=0;i--) { const k = addDays(t0,-i), t = totals(S.days[k]), L = limitOf("kcal", t.burn); rows.push({k, t, lim:L ? L.v : 0}); }
+  const rows = []; for (let i=6;i>=0;i--) { const k = addDays(t0,-i), t = totals(S.days[k]), L = limitOf("kcal", t.burn); rows.push({k, t, lim:L ? L.v : 0, sc:dayScore(k, k < t0)}); }
   const logged = rows.filter(r => r.t.meals);
   const avg = logged.length ? logged.reduce((a,r) => a + (r.t.n.kcal||0), 0)/logged.length : 0;
   const bal = logged.reduce((a,r) => a + (r.t.n.kcal||0) - (base.tdee + r.t.burn), 0);
@@ -1010,16 +1070,16 @@ function vInforme(p){
   <section class="panel stack"><h2 class="hl m">Últimos 7 días</h2>
    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" role="img" aria-label="Calorías comidas por día frente a tu máximo">${bars}</svg>
    <p class="muted" style="margin:0;font-size:.78rem">Barra: lo que comiste. Raya blanca: tu máximo de ese día.</p>
-   <div class="scroll"><table class="tbl"><thead><tr><th>Día</th><th>Comido</th><th>Máximo</th><th>Quemado</th><th>Margen</th></tr></thead><tbody>
-   ${rows.slice().reverse().map(r => { const v = r.t.n.kcal||0, m = r.lim - v; return `<tr><td>${esc(dayLabel(r.k))}</td><td>${r.t.meals?fmt(v):"—"}</td><td>${fmt(r.lim)}</td><td>${fmt(r.t.burn)}</td><td style="color:${!r.t.meals?"var(--dim)":m<0?"var(--bad)":"var(--good)"}">${r.t.meals?(m>0?"+":"")+fmt(m):"—"}</td></tr>`; }).join("")}
+   <div class="scroll"><table class="tbl"><thead><tr><th>Día</th><th>Comido</th><th>Máximo</th><th>Quemado</th><th>Margen</th><th>XP</th></tr></thead><tbody>
+   ${rows.slice().reverse().map(r => { const v = r.t.n.kcal||0, m = r.lim - v; return `<tr><td>${esc(dayLabel(r.k))}</td><td>${r.t.meals?fmt(v):"—"}</td><td>${fmt(r.lim)}</td><td>${fmt(r.t.burn)}</td><td style="color:${!r.t.meals?"var(--dim)":m<0?"var(--bad)":"var(--good)"}">${r.t.meals?(m>0?"+":"")+fmt(m):"—"}</td><td style="color:${r.sc.net<0?"var(--bad)":"var(--good)"}">${r.t.meals||r.sc.train?(r.sc.net>0?"+":"")+fmt(r.sc.net):"—"}</td></tr>`; }).join("")}
    </tbody></table></div>
    <dl class="kv"><dt>Media diaria (días registrados)</dt><dd>${fmt(avg)} kcal</dd><dt>Balance de la semana</dt><dd>${bal>0?"+":""}${fmt(bal)} kcal</dd><dt>Cambio de peso estimado</dt><dd>${bal>0?"+":""}${f1(bal/7700)} kg</dd></dl></section>
   ${pesos.length ? `<section class="panel"><h2 class="hl m">Peso</h2><dl class="kv" style="margin-top:10px">${pesos.map(x => `<dt>${esc(dayLabel(x.fecha))}</dt><dd>${f1(x.kg)} kg</dd>`).join("")}</dl></section>` : ""}`;
 }
 function vAch(p){
-  const got = ACH.filter(a => a.ok(p)).length;
+  const got = ACH.filter(a => achOn(a, p)).length;
   return `<section class="panel stack"><div class="row between"><h2 class="hl m">Logros</h2><span class="muted num" style="font-size:.85rem">${got}/${ACH.length}</span></div>
-   <div class="ach">${ACH.map(a => { const on = a.ok(p); return `<div class="${on?"on":""}"><div class="hex ${on?"":"off"}" style="--hc:${a.c};color:${on?a.c:"#3B4C68"}">${on ? I[a.ic] : "<b>?</b>"}</div>${on ? esc(a.n) : "Desconocido"}</div>`; }).join("")}</div></section>`;
+   <div class="ach">${ACH.map(a => { const on = achOn(a, p); return `<div class="${on?"on":""}"><div class="hex ${on?"":"off"}" style="--hc:${a.c};color:${on?a.c:"#3B4C68"}">${on ? I[a.ic] : "<b>?</b>"}</div>${on ? esc(a.n) : "Desconocido"}</div>`; }).join("")}</div></section>`;
 }
 
 /* ----- Mi dieta ----- */
@@ -1039,17 +1099,22 @@ function vDieta(){
       <option value="0" ${+d.extra===0?"selected":""}>No sumarlas a mi máximo</option><option value="0.5" ${+d.extra===.5?"selected":""}>Sumar la mitad (recomendado)</option><option value="1" ${+d.extra===1?"selected":""}>Sumarlas todas</option></select></div>
   </section>
   <section class="panel stack"><h2 class="hl m">Otros límites diarios</h2>
-    <p class="muted" style="margin:0;font-size:.85rem">«Máx» es un tope que no debes pasar. «Mín» es una cantidad a la que debes llegar.</p>
-    ${nutrients().filter(n => n.k !== "kcal").map(n => { const L = d.limites[n.k] || {v:0,t:"max",on:false}; const custom = n.k.startsWith("x_");
+    <p class="muted" style="margin:0;font-size:.85rem">Proteína, carbohidratos y grasa: todo lo que quede entre un 10 % por debajo y un 10 % por encima de tu objetivo cuenta como cumplido. Si te sales de esa franja, pierdes XP. En los límites que añadas tú, «Máx» es un tope y «Mín» una cantidad a la que llegar, con el mismo 10 % de margen.</p>
+    ${nutrients().filter(n => n.k !== "kcal").map(n => { const L = d.limites[n.k] || {v:0,t:"max",on:false}; const custom = n.k.startsWith("x_"), two = MACROS.includes(n.k);
       return `<div class="dlim"><input type="checkbox" data-lon="${n.k}" ${L.on?"checked":""} aria-label="Activar ${esc(n.n)}">
         <span style="min-width:0">${esc(n.n)}${custom ? ` <button class="link" data-act="delnut" data-k="${n.k}" style="color:var(--dim);font-size:.75rem">quitar</button>` : ""}</span>
-        <select data-lt="${n.k}" aria-label="Tipo"><option value="max" ${L.t==="max"?"selected":""}>Máx</option><option value="min" ${L.t==="min"?"selected":""}>Mín</option></select>
+        ${two ? `<span class="pill cy" style="justify-self:start">±10 %</span>` : `<select data-lt="${n.k}" aria-label="Tipo"><option value="max" ${L.t==="max"?"selected":""}>Máx</option><option value="min" ${L.t==="min"?"selected":""}>Mín</option></select>`}
         <div class="row u" style="gap:4px;flex-wrap:nowrap"><input data-lv="${n.k}" inputmode="decimal" value="${esc(L.v)}" aria-label="Valor"><span class="muted" style="font-size:.8rem">${esc(n.u)}</span></div></div>`; }).join("")}
     <div class="win stack" style="padding:12px"><span class="lbl" style="color:#BFEFFF">Añadir límite propio</span>
       <div class="row" style="flex-wrap:nowrap;gap:8px"><input id="nn" placeholder="Azúcar, sal, fibra…"><input id="nu" placeholder="g" style="max-width:70px"></div>
       <button class="btn sm" data-act="addnut">${I.plus} Añadir</button>
       <p class="muted" style="margin:0;font-size:.78rem">Después podrás apuntar ese valor en cada alimento de tu despensa.</p></div>
   </section>
+  <div class="win stack"><div class="win-h" style="color:#FF9DB0;border-color:rgba(255,79,112,.35)"><span class="ic" style="border-color:#FF9DB0">!</span>Castigos de XP</div>
+    <div style="display:flex;flex-direction:column;gap:6px;font-size:.88rem;color:#CFEFFF">
+      <div><b>Calorías:</b> sin margen. Si te pasas de tu máximo pierdes 50 XP más 4 XP por cada 1 % de exceso (hasta 200 XP en un día).</div>
+      <div><b>Proteína, carbohidratos y grasa:</b> dentro de ±10 % no pasa nada. Fuera de la franja pierdes 20 XP más 1 XP por cada 1 % más allá (hasta 60 XP por cada uno).</div>
+      <div>El castigo se aplica al cerrar el día. Quedarte corto en macros solo cuenta si registraste al menos 2 comidas. Si el XP baja, bajas de nivel, y nunca por debajo de 0. Los logros ya conseguidos no se pierden.</div></div></div>
   <section class="panel stack"><h2 class="hl m">Reglas</h2>
     <p class="muted" style="margin:0;font-size:.85rem">Normas que no son números. Cada día las marcas en Inicio.</p>
     ${(d.reglas||[]).map(r => `<div class="row between" style="flex-wrap:nowrap;border-top:1px solid var(--line2);padding-top:8px"><span>${esc(r.t)}</span><button class="x" data-act="delregla" data-id="${r.id}" aria-label="Quitar regla">×</button></div>`).join("")}
@@ -1114,6 +1179,30 @@ function mLevel(){
     <div class="hl xl num">NV ${to}</div><p class="muted" style="margin:0">Nivel ${from} → ${to}</p>
     ${up ? `<div class="hex big cur" style="--hc:${rk.c};margin:6px auto"><b>${rk.r}</b></div><p class="sys" style="margin:0;color:var(--cyan)">NUEVO RANGO: ${rk.r}</p>` : ""}
     <button class="btn pri block" data-act="closemodal">Aceptar</button></div></div>`;
+}
+function mReport(){
+  const {days, from, to} = S.modal, down = to < from, up = to > from, rkF = rankOf(from), rkT = rankOf(to);
+  const net = days.reduce((a, d) => a + d.net, 0);
+  return `<div class="ov center"><div class="pop win stack" style="width:100%;max-width:390px;max-height:86vh;overflow:auto;${down ? "border-color:rgba(255,79,112,.75);box-shadow:0 0 26px rgba(255,79,112,.3)" : ""}"><div class="scan"></div>
+    <div class="win-h" style="${down ? "color:#FF9DB0;border-color:rgba(255,79,112,.4)" : ""}"><span class="ic" style="${down ? "border-color:#FF9DB0" : ""}">!</span>Informe del sistema</div>
+    ${down ? `<div class="hl l" style="color:#FF9DB0;text-align:center">Has bajado de nivel</div><p class="sys" style="margin:0;text-align:center;font-size:1.15rem">NV ${from} → NV ${to}${rkF.r !== rkT.r ? ` · RANGO ${rkF.r} → ${rkT.r}` : ""}</p>`
+      : up ? `<div class="hl l" style="text-align:center">Has subido de nivel</div><p class="sys" style="margin:0;text-align:center;font-size:1.15rem">NV ${from} → NV ${to}</p>` : ""}
+    ${days.map(d => `<div style="border-top:1px solid var(--line2);padding-top:8px" class="stack">
+      <div class="row between" style="flex-wrap:nowrap"><b>${esc(dayLabel(d.k))}</b><span class="num" style="font-weight:800;color:${d.net < 0 ? "var(--bad)" : "var(--good)"}">${d.net > 0 ? "+" : ""}${fmt(d.net)} XP</span></div>
+      <div style="display:flex;flex-direction:column;gap:3px;font-size:.84rem;color:var(--muted)">
+      ${d.train ? `<div class="row between" style="flex-wrap:nowrap"><span>Entreno</span><span>+${fmt(d.train)}</span></div>` : ""}
+      ${d.logged ? `<div class="row between" style="flex-wrap:nowrap"><span>Comidas registradas</span><span>+${d.logged}</span></div>` : ""}
+      ${d.items.map(it => `<div class="row between" style="flex-wrap:nowrap;color:#FF9DB0"><span>${esc(it.n)}: ${f1(it.val)} / ${fmt(it.v)} ${esc(it.u)} (${it.dev > 0 ? "+" : "−"}${Math.round(Math.abs(it.dev)*100)} %)</span><span>−${it.pen}</span></div>`).join("")}
+      ${d.okb ? `<div class="row between" style="flex-wrap:nowrap;color:var(--good)"><span>Día cumplido</span><span>+${d.okb}</span></div>` : ""}</div></div>`).join("")}
+    ${days.length > 1 ? `<div class="row between" style="border-top:1px solid var(--line);padding-top:8px;flex-wrap:nowrap"><span class="lbl">Total</span><b class="num" style="color:${net < 0 ? "var(--bad)" : "var(--good)"}">${net > 0 ? "+" : ""}${fmt(net)} XP</b></div>` : ""}
+    <button class="btn ${down ? "danger" : "pri"} block" data-act="closemodal">Entendido</button></div></div>`;
+}
+function mDown(){
+  const {from, to} = S.modal, rkF = rankOf(from), rkT = rankOf(to);
+  return `<div class="ov center"><div class="pop win stack" style="text-align:center;width:100%;max-width:360px;border-color:rgba(255,79,112,.75)"><div class="scan"></div>
+    <div class="win-h" style="justify-content:center;color:#FF9DB0;border-color:rgba(255,79,112,.4)"><span class="ic" style="border-color:#FF9DB0">!</span>Penalización</div>
+    <div class="hl l" style="color:#FF9DB0">Has bajado de nivel</div><div class="hl xl num">NV ${to}</div><p class="muted" style="margin:0">Nivel ${from} → ${to}${rkF.r !== rkT.r ? ` · Rango ${rkF.r} → ${rkT.r}` : ""}</p>
+    <button class="btn danger block" data-act="closemodal">Entendido</button></div></div>`;
 }
 function mAch(){
   const a = ACH.find(x => x.id === S.modal.id);
