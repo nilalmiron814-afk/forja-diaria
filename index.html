@@ -1118,7 +1118,7 @@ function vDieta(){
         ${c.ajustado ? `<p class="pill bad" style="white-space:normal;border-radius:10px;padding:6px 10px;margin:0">Subido al mínimo seguro: comer menos de esto no es recomendable sin supervisión.</p>` : ""}
         <p class="muted" style="margin:0;font-size:.8rem">Calculado con tu perfil (fórmula de Mifflin-St Jeor). Si tu nutricionista te dio una cifra, elige «Las pongo yo».</p>`}
     <div class="field"><label class="lbl" for="d-extra">Calorías del entreno</label><select id="d-extra">
-      <option value="0" ${+d.extra===0?"selected":""}>No sumarlas a mi máximo</option><option value="0.5" ${+d.extra===.5?"selected":""}>Sumar la mitad (recomendado)</option><option value="1" ${+d.extra===1?"selected":""}>Sumarlas todas</option></select></div>
+      <option value="0" ${+d.extra===0?"selected":""}>No sumarlas a mi máximo</option><option value="0.5" ${+d.extra===.5?"selected":""}>Sumar el 50 %</option><option value="0.75" ${+d.extra===.75?"selected":""}>Sumar el 75 %</option><option value="1" ${+d.extra===1?"selected":""}>Sumarlas todas (100 %)</option></select></div>
   </section>
   <section class="panel stack"><h2 class="hl m">Otros límites diarios</h2>
     <p class="muted" style="margin:0;font-size:.85rem">Proteína: tienes que llegar a tu objetivo con hasta un 10 % de margen por debajo; pasarte no cuesta nada. Carbohidratos: dentro de ±20 %. Grasa: solo cuenta pasarte (más de un 15 %); quedarte corto no cuesta nada. En los límites que añadas tú, «Máx» es un tope y «Mín» una cantidad a la que llegar, con el mismo 10 % de margen.</p>
@@ -1712,7 +1712,7 @@ init();
 <script>
 (function(){
   "use strict";
-  var BUILD = "20261009220231";
+  var BUILD = "20261009220648";
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(function(){});
   var shown = false;
   function check(){

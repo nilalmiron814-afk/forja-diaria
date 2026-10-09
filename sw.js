@@ -1,5 +1,5 @@
 /* Forja Diaria: red primero (las mejoras llegan solas) y caché si no hay conexión. */
-const V = "forja-20261009220231";
+const V = "forja-20261009220648";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png"];
 self.addEventListener("install", e => { self.skipWaiting(); e.waitUntil(caches.open(V).then(c => c.addAll(SHELL))); });
 self.addEventListener("activate", e => {
